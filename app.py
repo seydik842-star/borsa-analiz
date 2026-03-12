@@ -63,7 +63,6 @@ AYARLAR = {
     "cdl_carpan": 1.0
 }
 
-TUM_FORMASYONLAR = talib.get_function_groups()['Pattern Recognition']
 GUCLU_FORMASYONLAR = [
     "cdl_engulfing", "cdl_hammer", "cdl_morningstar", "cdl_eveningstar", 
     "cdl_shootingstar", "cdl_doji", "cdl_piercing", "cdl_darkcloudcover", 
@@ -1310,3 +1309,4 @@ if __name__ == '__main__':
     # Host '0.0.0.0' olmalı ki dış dünya (internet) uygulamana erişebilsin
 
     app.run(host='0.0.0.0', port=port, debug=False)
+

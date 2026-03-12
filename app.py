@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas as pd
 import threading
 import time
-import talib 
+ import pandas_ta as ta
 import random
 import warnings
 import logging
@@ -65,11 +65,10 @@ AYARLAR = {
 
 TUM_FORMASYONLAR = talib.get_function_groups()['Pattern Recognition']
 GUCLU_FORMASYONLAR = [
-    "CDLENGULFING", "CDLHAMMER", "CDLMORNINGSTAR", "CDLEVENINGSTAR", 
-    "CDLSHOOTINGSTAR", "CDLDOJI", "CDLPIERCING", "CDLDARKCLOUDCOVER", 
-    "CDLMARUBOZU", "CDLHARAMI"
+    "cdl_engulfing", "cdl_hammer", "cdl_morningstar", "cdl_eveningstar", 
+    "cdl_shootingstar", "cdl_doji", "cdl_piercing", "cdl_darkcloudcover", 
+    "cdl_marubozu", "cdl_harami"
 ]
-
 # --- A.I. MOTORU ---
 def analiz_motoru():
     global borsa_verisi, radar_listesi, maliyetler, sanal_cuzdan, AYARLAR, son_guncelleme_zamani
@@ -97,33 +96,68 @@ def analiz_motoru():
                     fiyat = float(df['Close'].iloc[-1])
                     op, hi, lo, cl, vol = df['Open'], df['High'], df['Low'], df['Close'], df['Volume']
                     
-                    rsi = talib.RSI(cl, timeperiod=int(AYARLAR['rsi_period'])).iloc[-1]
-                    macd, macdsignal, _ = talib.MACD(cl, fastperiod=int(AYARLAR['macd_fast']), slowperiod=int(AYARLAR['macd_slow']), signalperiod=int(AYARLAR['macd_sig']))
-                    sma50 = talib.SMA(cl, timeperiod=int(AYARLAR['sma_fast'])).iloc[-1]
-                    sma200 = talib.SMA(cl, timeperiod=int(AYARLAR['sma_slow'])).iloc[-1]
-                    vol_sma = talib.SMA(vol, timeperiod=20).iloc[-1]
+                    # --- PANDAS_TA GÜNCELLEMESİ (Hatasız Versiyon) ---
+                    # RSI Hesaplama
+                    rsi_all = df.ta.rsi(length=int(AYARLAR['rsi_period']))
+                    rsi = rsi_all.iloc[-1] if rsi_all is not None and not rsi_all.empty else 0
+                    
+                    # MACD Hesaplama
+                    macd_df = df.ta.macd(fast=int(AYARLAR['macd_fast']), slow=int(AYARLAR['macd_slow']), signal=int(AYARLAR['macd_sig']))
+                    if macd_df is not None and not macd_df.empty:
+                        macd = macd_df.iloc[:, 0].iloc[-1]        # MACD Line
+                        macdsignal = macd_df.iloc[:, 2].iloc[-1]  # Signal Line
+                    else:
+                        macd, macdsignal = 0, 0
+
+                    # SMA Hesaplamaları
+                    sma50_series = df.ta.sma(length=int(AYARLAR['sma_fast']))
+                    sma50 = sma50_series.iloc[-1] if sma50_series is not None else 0
+                    
+                    sma200_series = df.ta.sma(length=int(AYARLAR['sma_slow']))
+                    sma200 = sma200_series.iloc[-1] if sma200_series is not None else 0
+                    
+                    vol_sma_series = df.ta.sma(close=vol, length=20)
+                    vol_sma = vol_sma_series.iloc[-1] if vol_sma_series is not None else 0
+                    
                     degisim = ((cl.iloc[-1] - cl.iloc[-2]) / cl.iloc[-2]) * 100
                     
-                    uzun_vade_trend = True if len(cl) > 800 and fiyat > talib.SMA(cl, timeperiod=800).iloc[-1] else False
-                    hacim_soku = True if vol.iloc[-1] > (vol_sma * float(AYARLAR['vol_multi'])) else False
-
+                    # Uzun Vade Trend ve Hacim Şoku
+                    sma800_series = df.ta.sma(length=800)
+                    uzun_vade_trend = True if (len(cl) > 800 and sma800_series is not None and fiyat > sma800_series.iloc[-1]) else False
+                    hacim_soku = True if (vol_sma > 0 and vol.iloc[-1] > (vol_sma * float(AYARLAR['vol_multi']))) else False
+                    # ------------------------------------------------
                     haber_etkisi = "Nötr Haber Akışı"
                     if degisim > float(AYARLAR['sent_limit']) and vol.iloc[-1] > vol_sma * 1.5: 
                         haber_etkisi = f"📈 Pozitif Haber/Beklenti"
                     elif degisim < -float(AYARLAR['sent_limit']) and vol.iloc[-1] > vol_sma * 1.5: 
                         haber_etkisi = f"📉 Negatif Haber/Baskı"
 
+                    # --- PANDAS_TA MUM FORMASYON GÜNCELLEMESİ ---
                     boga_sayisi, ayi_sayisi = 0, 0
                     aktif_formasyonlar = []
                     
                     if AYARLAR['cdl_aktif']:
-                        tarama_listesi = GUCLU_FORMASYONLAR if AYARLAR['cdl_guclu'] else TUM_FORMASYONLAR
-                        for fn in tarama_listesi:
-                            sonuc = getattr(talib, fn)(op, hi, lo, cl).iloc[-1]
-                            if sonuc == 100: 
-                                boga_sayisi += 1; aktif_formasyonlar.append(fn.replace("CDL","")+"(B)")
-                            elif sonuc == -100: 
-                                ayi_sayisi += 1
+                        # pandas_ta ile tüm mum formasyonlarını tek seferde hesaplıyoruz
+                        # Not: Formasyon isimleri küçük harf olmalı (cdl_hammer gibi)
+                        try:
+                            # GUCLU_FORMASYONLAR listesindeki tüm mumları tarar
+                            cdl_df = df.ta.cdl_pattern(name=GUCLU_FORMASYONLAR)
+                            
+                            if cdl_df is not None and not cdl_df.empty:
+                                son_mum_degerleri = cdl_df.iloc[-1]
+                                
+                                for fn in GUCLU_FORMASYONLAR:
+                                    if fn in son_mum_degerleri:
+                                        sonuc = son_mum_degerleri[fn]
+                                        if sonuc > 0: # Boğa formasyonu (Genelde 100 döner)
+                                            boga_sayisi += 1
+                                            aktif_formasyonlar.append(fn.replace("cdl_", "").upper() + "(B)")
+                                        elif sonuc < 0: # Ayı formasyonu (Genelde -100 döner)
+                                            ayi_sayisi += 1
+                                            aktif_formasyonlar.append(fn.replace("cdl_", "").upper() + "(A)")
+                        except Exception as e:
+                            logging.error(f"Formasyon tarama hatası: {e}")
+                    # --------------------------------------------
 
                     # YENİ: A.I. MENTÖR SİSTEMİ (Neden Al/Sat Dedi?)
                     skor = 0
@@ -216,39 +250,69 @@ def firsat_tarayici():
             df_full = yf.download(" ".join(tarama_listesi), period="5d", interval="15m", group_by='ticker', progress=False)
 
             for hisse in tarama_listesi:
-                df = df_full[hisse] if len(tarama_listesi) > 1 else df_full
-                df = df.dropna()
-                if df.empty: continue
+                try:
+                    # Hisse verisini seçiyoruz
+                    df = df_full[hisse] if len(tarama_listesi) > 1 else df_full
+                    df = df.dropna()
+                    if df.empty: continue
 
-                fiyat = float(df['Close'].iloc[-1])
-                op, hi, lo, cl = df['Open'], df['High'], df['Low'], df['Close']
-                
-                rsi = talib.RSI(cl, timeperiod=int(AYARLAR['rsi_period'])).iloc[-1]
-                macd, macdsig, _ = talib.MACD(cl, fastperiod=int(AYARLAR['macd_fast']), slowperiod=int(AYARLAR['macd_slow']), signalperiod=int(AYARLAR['macd_sig']))
-                
-                firsat_bulundu = False
-                formasyon_adi = ""
-                
-                if AYARLAR['cdl_aktif']:
-                    tarama_l = GUCLU_FORMASYONLAR if AYARLAR['cdl_guclu'] else TUM_FORMASYONLAR
-                    for fn in tarama_l:
-                        if getattr(talib, fn)(op, hi, lo, cl).iloc[-1] == 100:
-                            firsat_bulundu = True; formasyon_adi = fn.replace("CDL", ""); break
-                
-                if not firsat_bulundu and rsi < int(AYARLAR['rsi_os']):
-                    firsat_bulundu = True; formasyon_adi = f"RSI Dip Tespiti ({rsi:.1f})"
-                
-                if not firsat_bulundu and (macd.iloc[-1] > macdsig.iloc[-1] and macd.iloc[-2] <= macdsig.iloc[-2]):
-                    firsat_bulundu = True; formasyon_adi = "A.I. MACD Kesişimi (AL)"
-                
-                if firsat_bulundu:
-                    su_an = time.time()
-                    if hisse not in bildirilen_hisseler or (su_an - bildirilen_hisseler[hisse]) > 7200:
-                        with notif_lock: 
-                            if len(bildirimler) >= 20: 
-                                bildirimler.pop(0)
-                            bildirimler.append({"hisse": hisse.replace(".IS", ""), "fiyat": f"{fiyat:.2f}", "mesaj": f"{formasyon_adi}", "zaman": time.strftime("%H:%M:%S")})
-                        bildirilen_hisseler[hisse] = su_an
+                    fiyat = float(df['Close'].iloc[-1])
+                    
+                    # --- PANDAS_TA DÖNÜŞÜMÜ (TALIB YOK) ---
+                    # RSI Hesaplama
+                    rsi_series = df.ta.rsi(length=int(AYARLAR['rsi_period']))
+                    rsi = rsi_series.iloc[-1] if rsi_series is not None and not rsi_series.empty else 50
+                    
+                    # MACD Hesaplama
+                    macd_df = df.ta.macd(fast=int(AYARLAR['macd_fast']), slow=int(AYARLAR['macd_slow']), signal=int(AYARLAR['macd_sig']))
+                    
+                    firsat_bulundu = False
+                    formasyon_adi = ""
+                    
+                    # 1. Mum Formasyon Taraması
+                    if AYARLAR['cdl_aktif']:
+                        try:
+                            # GUCLU_FORMASYONLAR listesindeki cdl_... isimlerini tarar
+                            cdl_df = df.ta.cdl_pattern(name=GUCLU_FORMASYONLAR)
+                            if cdl_df is not None and not cdl_df.empty:
+                                son_mum = cdl_df.iloc[-1]
+                                for fn in GUCLU_FORMASYONLAR:
+                                    if fn in son_mum and son_mum[fn] == 100: # 100 = AL Sinyali
+                                        firsat_bulundu = True
+                                        formasyon_adi = fn.replace("cdl_", "").upper()
+                                        break
+                        except: pass
+                    
+                    # 2. RSI Dip Tespiti
+                    if not firsat_bulundu and rsi < int(AYARLAR['rsi_os']):
+                        firsat_bulundu = True
+                        formasyon_adi = f"RSI Dip Tespiti ({rsi:.1f})"
+                    
+                    # 3. MACD Kesişimi (AL Sinyali)
+                    if not firsat_bulundu and macd_df is not None and len(macd_df) >= 2:
+                        m_line = macd_df.iloc[:, 0] # MACD Çizgisi
+                        s_line = macd_df.iloc[:, 2] # Sinyal Çizgisi
+                        if m_line.iloc[-1] > s_line.iloc[-1] and m_line.iloc[-2] <= s_line.iloc[-2]:
+                            firsat_bulundu = True
+                            formasyon_adi = "A.I. MACD Kesişimi (AL)"
+                    
+                    # --- BİLDİRİM GÖNDERME SİSTEMİ ---
+                    if firsat_bulundu:
+                        su_an = time.time()
+                        if hisse not in bildirilen_hisseler or (su_an - bildirilen_hisseler[hisse]) > 7200:
+                            with notif_lock: 
+                                if len(bildirimler) >= 20: 
+                                    bildirimler.pop(0)
+                                bildirimler.append({
+                                    "hisse": hisse.replace(".IS", ""), 
+                                    "fiyat": f"{fiyat:.2f}", 
+                                    "mesaj": f"{formasyon_adi}", 
+                                    "zaman": time.strftime("%H:%M:%S")
+                                })
+                            bildirilen_hisseler[hisse] = su_an
+                except Exception as hisse_hata:
+                    logging.error(f"{hisse} tarama hatası: {hisse_hata}")
+                    continue
         except Exception as e: 
             logging.error(f"Fırsat tarayıcı genel hatası: {e}") 
         time.sleep(20) 
@@ -1244,4 +1308,5 @@ if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     
     # Host '0.0.0.0' olmalı ki dış dünya (internet) uygulamana erişebilsin
+
     app.run(host='0.0.0.0', port=port, debug=False)

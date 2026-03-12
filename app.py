@@ -1138,7 +1138,9 @@ def run_backtest():
         cl = df['Close']
         if len(cl) < 15: return jsonify({'error': True}) 
         
-        rsi = talib.RSI(cl, timeperiod=int(AYARLAR['rsi_period']))
+        rsi_all = df.ta.rsi(length=int(AYARLAR['rsi_period']))
+        rsi = rsi_all if rsi_all is not None else pd.Series(0, index=df.index)
+        
         islem = 0; kar_s = 0; zarar_s = 0; getiri = 0.0; elde = False; alis = 0
         
         for i in range(14, len(cl)):
@@ -1215,13 +1217,34 @@ def get_detail():
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
         df = df.dropna()
 
+        # --- TEKNİK GÖSTERGELER (PANDAS-TA GÜNCELLEMESİ) ---
         cl = df['Close']; op = df['Open']; hi = df['High']; lo = df['Low']; vol = df['Volume']
-        df['RSI'] = talib.RSI(cl, timeperiod=int(AYARLAR['rsi_period']))
-        macd, macdsig, macdhist = talib.MACD(cl, fastperiod=int(AYARLAR['macd_fast']), slowperiod=int(AYARLAR['macd_slow']), signalperiod=int(AYARLAR['macd_sig']))
-        sma50 = talib.SMA(cl, timeperiod=int(AYARLAR['sma_fast']))
-        sma200 = talib.SMA(cl, timeperiod=int(AYARLAR['sma_slow']))
-        upper, middle, lower = talib.BBANDS(cl, timeperiod=int(AYARLAR['bb_period']), nbdevup=float(AYARLAR['bb_std']), nbdevdn=float(AYARLAR['bb_std']), matype=0)
         
+        # RSI hesaplama
+        df['RSI'] = df.ta.rsi(length=int(AYARLAR['rsi_period']))
+        
+        # MACD hesaplama (Geriye tablo döner, kolonları parçalıyoruz)
+        macd_df = df.ta.macd(fast=int(AYARLAR['macd_fast']), slow=int(AYARLAR['macd_slow']), signal=int(AYARLAR['macd_sig']))
+        if macd_df is not None:
+            macd = macd_df.iloc[:, 0]
+            macdsig = macd_df.iloc[:, 2]
+            macdhist = macd_df.iloc[:, 1]
+        else:
+            macd = macdsig = macdhist = pd.Series(0, index=df.index)
+        
+        # Hareketli Ortalamalar (SMA)
+        sma50 = df.ta.sma(length=int(AYARLAR['sma_fast']))
+        sma200 = df.ta.sma(length=int(AYARLAR['sma_slow']))
+        
+        # Bollinger Bantları hesaplama
+        bb_df = df.ta.bbands(length=int(AYARLAR['bb_period']), std=float(AYARLAR['bb_std']))
+        if bb_df is not None:
+            lower = bb_df.iloc[:, 0]
+            middle = bb_df.iloc[:, 1]
+            upper = bb_df.iloc[:, 2]
+        else:
+            lower = middle = upper = pd.Series(0, index=df.index)
+        # --------------------------------------------------
         gercek_skor = 0
         son_rsi = float(df['RSI'].iloc[-1]) if not pd.isna(df['RSI'].iloc[-1]) else 50
         son_macd = float(macd.iloc[-1]) if not pd.isna(macd.iloc[-1]) else 0
@@ -1242,20 +1265,34 @@ def get_detail():
             else: gercek_skor -= 2 
             
         boga_sayisi, ayi_sayisi = 0, 0
+        # --- MUM FORMASYONLARI VE SENTİMENT ANALİZİ (PANDAS-TA) ---
         if AYARLAR['cdl_aktif']:
-            tarama_listesi = GUCLU_FORMASYONLAR if AYARLAR['cdl_guclu'] else TUM_FORMASYONLAR
-            for fn in tarama_listesi:
-                sonuc = getattr(talib, fn)(op, hi, lo, cl).iloc[-1]
-                if sonuc == 100: boga_sayisi += 1
-                elif sonuc == -100: ayi_sayisi += 1
+            try:
+                # pandas_ta ile toplu formasyon taraması
+                cdl_sonuclar = df.ta.cdl_pattern(name=GUCLU_FORMASYONLAR)
+                if cdl_sonuclar is not None:
+                    son_mum = cdl_sonuclar.iloc[-1]
+                    for fn in GUCLU_FORMASYONLAR:
+                        if fn in son_mum:
+                            if son_mum[fn] == 100: boga_sayisi += 1
+                            elif son_mum[fn] == -100: ayi_sayisi += 1
+            except: pass
             
         gercek_skor += (boga_sayisi - ayi_sayisi) * float(AYARLAR['cdl_carpan'])
 
         degisim = ((cl.iloc[-1] - cl.iloc[-2]) / cl.iloc[-2]) * 100
-        vol_sma = talib.SMA(vol, timeperiod=20).iloc[-1]
+        
+        # SMA hesaplaması talıb olmadan yapılıyor
+        vol_sma_series = df.ta.sma(close=vol, length=20)
+        vol_sma = vol_sma_series.iloc[-1] if vol_sma_series is not None else 0
+        
         sentiment = "Nötr (Olağan Piyasa Hareketi)"
-        if degisim > float(AYARLAR['sent_limit']) and vol.iloc[-1] > vol_sma * 1.5: sentiment = "📈 Pozitif Haber/Beklenti"
-        elif degisim < -float(AYARLAR['sent_limit']) and vol.iloc[-1] > vol_sma * 1.5: sentiment = "📉 Negatif Haber/Baskı"
+        if vol_sma > 0:
+            if degisim > float(AYARLAR['sent_limit']) and vol.iloc[-1] > vol_sma * 1.5: 
+                sentiment = "📈 Pozitif Haber/Beklenti"
+            elif degisim < -float(AYARLAR['sent_limit']) and vol.iloc[-1] > vol_sma * 1.5: 
+                sentiment = "📉 Negatif Haber/Baskı"
+        # ---------------------------------------------------------
 
         candles, rsi_data, macd_line, macd_signal, macd_hist = [], [], [], [], []
         sma50_data, sma200_data, bb_upper, bb_lower = [], [], [], []
@@ -1309,4 +1346,5 @@ if __name__ == '__main__':
     # Host '0.0.0.0' olmalı ki dış dünya (internet) uygulamana erişebilsin
 
     app.run(host='0.0.0.0', port=port, debug=False)
+
 
